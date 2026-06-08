@@ -3,7 +3,7 @@ Polls LiteLLM_ManagedObjectTable to check if the batch job is complete, and if t
 """
 
 from datetime import datetime, timedelta, timezone
-from typing import TYPE_CHECKING, List, Optional, Tuple
+from typing import TYPE_CHECKING, Any, List, Optional, Tuple
 
 from litellm._logging import verbose_proxy_logger
 from litellm._uuid import uuid
@@ -47,6 +47,65 @@ def _get_passthrough_batch_retrieve_kwargs(model_id: str) -> dict:
             retrieve_kwargs["model"] = model_id.split("/", 1)[1]
 
     return retrieve_kwargs
+
+
+def _extract_raw_output_file_id(output_file_id: str) -> str:
+    """Resolve a batch output file ID down to the raw provider file ID.
+
+    Handles both managed-ID encodings before falling back to the input:
+    - passthrough managed IDs: litellm_proxy:passthrough;...;raw_id,<id>
+    - native unified file IDs: base64(litellm_proxy;...;llm_output_file_id,<id>)
+    """
+    from litellm.proxy.openai_files_endpoints.common_utils import (
+        _is_base64_encoded_unified_file_id,
+    )
+    from litellm.proxy.pass_through_endpoints.managed_id_codec import (
+        decode as decode_passthrough_managed_id,
+    )
+
+    passthrough_payload = decode_passthrough_managed_id(output_file_id)
+    if passthrough_payload is not None:
+        return passthrough_payload.raw_provider_id
+
+    decoded = _is_base64_encoded_unified_file_id(output_file_id)
+    if decoded:
+        try:
+            return decoded.split("llm_output_file_id,")[1].split(";")[0]
+        except (IndexError, AttributeError):
+            pass
+
+    return output_file_id
+
+
+def _resolve_provider_and_model(
+    deployment_info: Optional[Any],
+    passthrough_retrieve_kwargs: Optional[dict],
+) -> Tuple[Optional[str], Optional[str], dict]:
+    """Resolve ``(llm_provider, model_name, deployment_model_info)`` for cost calc.
+
+    Native (router) batches resolve the deployment's configured provider/model
+    plus any custom batch pricing in ``model_info``.  Passthrough batches have no
+    deployment, so the provider comes from the env-cred kwargs and ``model_name``
+    is left ``None`` so that cost is derived per-line from the batch output JSONL.
+    """
+    from litellm.litellm_core_utils.get_llm_provider_logic import get_llm_provider
+
+    if deployment_info is not None:
+        model_name, llm_provider, _, _ = get_llm_provider(
+            model=deployment_info.litellm_params.model,
+            custom_llm_provider=deployment_info.litellm_params.custom_llm_provider,
+        )
+        deployment_model_info = (
+            deployment_info.model_info.model_dump()
+            if deployment_info.model_info
+            else {}
+        )
+        return llm_provider, model_name, deployment_model_info
+
+    llm_provider = (passthrough_retrieve_kwargs or {}).get(
+        "custom_llm_provider", "openai"
+    )
+    return llm_provider, None, {}
 
 
 class CheckBatchCost:
@@ -139,12 +198,12 @@ class CheckBatchCost:
             calculate_batch_cost_and_usage,
         )
         from litellm.files.main import afile_content
-        from litellm.litellm_core_utils.get_llm_provider_logic import get_llm_provider
         from litellm.litellm_core_utils.litellm_logging import Logging as LiteLLMLogging
         from litellm.proxy.openai_files_endpoints.common_utils import (
             _is_base64_encoded_unified_file_id,
             get_batch_id_from_unified_batch_id,
             get_model_id_from_unified_batch_id,
+            is_passthrough_unified_batch_id,
         )
 
         try:
@@ -218,10 +277,14 @@ class CheckBatchCost:
 
             model_id = get_model_id_from_unified_batch_id(unified_object_id)
             batch_id = get_batch_id_from_unified_batch_id(unified_object_id)
+            is_passthrough_batch = is_passthrough_unified_batch_id(
+                unified_object_id
+            )
 
-            if model_id is None:
+            if model_id is None or not batch_id:
                 verbose_proxy_logger.info(
-                    f"Skipping job {unified_object_id} because it is not a valid model id"
+                    f"Skipping job {unified_object_id} because it is not a valid "
+                    f"batch id (model_id={model_id!r}, batch_id={batch_id!r})"
                 )
                 if prom_logger:
                     prom_logger.record_check_batch_cost_error("invalid_model_id")
@@ -311,13 +374,9 @@ class CheckBatchCost:
                 # This background job runs as default_user_id, so going through the HTTP endpoint
                 # would trigger check_managed_file_id_access and get 403. Instead, extract the raw
                 # provider file ID and call afile_content directly with deployment credentials.
-                raw_output_file_id = response.output_file_id
-                decoded = _is_base64_encoded_unified_file_id(raw_output_file_id)
-                if decoded:
-                    try:
-                        raw_output_file_id = decoded.split("llm_output_file_id,")[1].split(";")[0]
-                    except (IndexError, AttributeError):
-                        pass
+                raw_output_file_id = _extract_raw_output_file_id(
+                    response.output_file_id
+                )
 
                 credentials = (
                     self.llm_router.get_deployment_credentials_with_provider(model_id)
@@ -366,19 +425,34 @@ class CheckBatchCost:
                         prom_logger.record_check_batch_cost_error("deployment_not_found")
                     continue
 
-                if deployment_info is not None:
-                    custom_llm_provider = deployment_info.litellm_params.custom_llm_provider
-                    litellm_model_name = deployment_info.litellm_params.model
-                else:
-                    custom_llm_provider = passthrough_retrieve_kwargs.get(
-                        "custom_llm_provider", "openai"
+                # Native batches resolve provider/model from the deployment;
+                # passthrough batches fall back to env-cred provider with the
+                # model name derived per-line from the output JSONL.
+                llm_provider, model_name, deployment_model_info = (
+                    _resolve_provider_and_model(
+                        deployment_info=deployment_info,
+                        passthrough_retrieve_kwargs=passthrough_retrieve_kwargs,
                     )
-                    litellm_model_name = passthrough_retrieve_kwargs.get("model", model_id)
-
-                model_name, llm_provider, _, _ = get_llm_provider(
-                    model=litellm_model_name,
-                    custom_llm_provider=custom_llm_provider,
                 )
+
+                batch_cost, batch_usage, batch_models = (
+                    await calculate_batch_cost_and_usage(
+                        file_content_dictionary=file_content_as_dict,
+                        custom_llm_provider=llm_provider,  # type: ignore
+                        model_name=model_name,
+                        model_info=deployment_model_info,  # type: ignore[arg-type]
+                    )
+                )
+                if is_passthrough_batch and not batch_models:
+                    verbose_proxy_logger.info(
+                        f"Skipping job {unified_object_id}: no models found in "
+                        f"batch output for provider={model_id!r}"
+                    )
+                    if prom_logger:
+                        prom_logger.record_check_batch_cost_error(
+                            "batch_models_not_found"
+                        )
+                    continue
 
                 # CheckBatchCost bypasses async_post_call_success_hook, so convert raw
                 # output/error file IDs to managed base64 IDs before the DB write here.
@@ -389,6 +463,15 @@ class CheckBatchCost:
                         user_id=job.created_by or "default-user-id",
                         team_id=getattr(job, "team_id", None),
                     )
+                    _resolved_model_name = (
+                        str(model_name)
+                        if model_name
+                        else (
+                            deployment_info.model_name
+                            if deployment_info is not None
+                            else batch_models[0]
+                        )
+                    )
                     for _file_attr in ["output_file_id", "error_file_id"]:
                         _raw_file_id = getattr(response, _file_attr, None)
                         if _raw_file_id and not _is_base64_encoded_unified_file_id(_raw_file_id):
@@ -396,7 +479,7 @@ class CheckBatchCost:
                                 _unified_file_id = managed_files_hook.get_unified_output_file_id(
                                     output_file_id=_raw_file_id,
                                     model_id=model_id,
-                                    model_name=str(model_name) if model_name else deployment_info.model_name or None,
+                                    model_name=_resolved_model_name,
                                 )
                                 await managed_files_hook.store_unified_file_id(
                                     file_id=_unified_file_id,
@@ -415,22 +498,6 @@ class CheckBatchCost:
                                     f"CheckBatchCost: failed to create managed file ID for "
                                     f"{_file_attr}={_raw_file_id!r}: {_e}"
                                 )
-
-                # Pass deployment model_info so custom batch pricing
-                # (input_cost_per_token_batches etc.) is used for cost calc
-                deployment_model_info = (
-                    deployment_info.model_info.model_dump()
-                    if deployment_info and deployment_info.model_info
-                    else {}
-                )
-                batch_cost, batch_usage, batch_models = (
-                    await calculate_batch_cost_and_usage(
-                        file_content_dictionary=file_content_as_dict,
-                        custom_llm_provider=llm_provider,  # type: ignore
-                        model_name=model_name,
-                        model_info=deployment_model_info,  # type: ignore[arg-type]
-                    )
-                )
                 logging_obj = LiteLLMLogging(
                     model=batch_models[0],
                     messages=[{"role": "user", "content": "<retrieve_batch>"}],
