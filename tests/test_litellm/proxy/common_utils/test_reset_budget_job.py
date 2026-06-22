@@ -5,6 +5,7 @@ import sys
 import time
 import types
 from datetime import datetime, timedelta, timezone
+from datetime import time as dt_time
 from typing import Any, Dict, List
 from unittest.mock import AsyncMock, MagicMock
 
@@ -16,6 +17,7 @@ sys.path.insert(
 
 from litellm._logging import verbose_proxy_logger
 from litellm.proxy.common_utils.reset_budget_job import ResetBudgetJob
+from litellm.proxy.common_utils.timezone_utils import BudgetResetSettings
 from litellm.proxy.utils import ProxyLogging
 
 
@@ -270,6 +272,44 @@ def test_reset_budget_for_key(reset_budget_job, mock_prisma_client):
     assert set(write["data"].keys()) == {"spend", "budget_reset_at"}
 
 
+def test_reset_budget_for_key_honors_injected_reset_time(
+    mock_prisma_client, mock_proxy_logging
+):
+    """Injected BudgetResetSettings drives the written reset time end to end (DI, no globals).
+
+    Before the configurable-reset-time change this wrote a midnight reset_at (hour 0);
+    with noon injected it must write a noon reset_at.
+    """
+    job = ResetBudgetJob(
+        proxy_logging_obj=mock_proxy_logging,
+        prisma_client=mock_prisma_client,
+        reset_settings=BudgetResetSettings(
+            timezone="UTC", reset_time_of_day=dt_time(12, 0)
+        ),
+    )
+    now = datetime.now(timezone.utc)
+    test_key = type(
+        "LiteLLM_VerificationToken",
+        (),
+        {
+            "spend": 100.0,
+            "budget_duration": "1d",
+            "budget_reset_at": now,
+            "id": "test-key-noon",
+            "token": "tok-noon",
+        },
+    )
+    mock_prisma_client.data["key"] = [test_key]
+
+    asyncio.run(job.reset_budget_for_litellm_keys())
+
+    key_writes = [c for c in mock_prisma_client.db.batch_calls if c["table"] == "key"]
+    assert len(key_writes) == 1
+    reset_at = key_writes[0]["data"]["budget_reset_at"].astimezone(timezone.utc)
+    assert reset_at.hour == 12
+    assert reset_at.minute == 0
+
+
 def test_reset_budget_for_user(reset_budget_job, mock_prisma_client):
     # Setup test data with timezone-aware datetime
     now = datetime.now(timezone.utc)
@@ -445,7 +485,9 @@ def test_reset_budget_all(reset_budget_job, mock_prisma_client):
         ("user", {"user_id": "uid-all-1"}),
         ("team", {"team_id": "tid-all-1"}),
     ]:
-        writes = [c for c in mock_prisma_client.db.batch_calls if c["table"] == table_name]
+        writes = [
+            c for c in mock_prisma_client.db.batch_calls if c["table"] == table_name
+        ]
         assert len(writes) == 1, f"expected 1 {table_name} write, got {len(writes)}"
         assert writes[0]["where"] == where
         assert writes[0]["data"]["spend"] == 0
@@ -1525,7 +1567,9 @@ def test_reset_does_not_zero_counter_when_db_write_fails(monkeypatch):
     counter_cache.in_memory_cache.set_cache.assert_not_called()
 
 
-def test_reset_budget_for_keys_writes_only_spend_and_reset_at(reset_budget_job, mock_prisma_client):
+def test_reset_budget_for_keys_writes_only_spend_and_reset_at(
+    reset_budget_job, mock_prisma_client
+):
     """
     Regression for #27730 (the trigger-half).
 
@@ -1543,8 +1587,8 @@ def test_reset_budget_for_keys_writes_only_spend_and_reset_at(reset_budget_job, 
             "budget_duration": "30d",
             "budget_reset_at": now,
             "token": "sk-problematic",
-            "object_permission_id": "perm-abc",   # would be rejected on update
-            "budget_limits": [{"max_budget": 5}],   # would be rejected on update
+            "object_permission_id": "perm-abc",  # would be rejected on update
+            "budget_limits": [{"max_budget": 5}],  # would be rejected on update
             "metadata": {"some": "thing"},
         },
     )

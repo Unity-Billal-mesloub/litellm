@@ -13,6 +13,11 @@ from litellm.proxy._types import (
     LiteLLM_UserTable,
     LiteLLM_VerificationToken,
 )
+from litellm.proxy.common_utils.timezone_utils import (
+    BudgetResetSettings,
+    compute_budget_reset_at,
+    get_budget_reset_settings,
+)
 from litellm.proxy.utils import PrismaClient, ProxyLogging
 from litellm.repositories.organization_repository import OrganizationRepository
 from litellm.repositories.table_repositories import (
@@ -32,9 +37,17 @@ class ResetBudgetJob:
     Resets the budget for all the keys, users, and teams that need it
     """
 
-    def __init__(self, proxy_logging_obj: ProxyLogging, prisma_client: PrismaClient):
+    def __init__(
+        self,
+        proxy_logging_obj: ProxyLogging,
+        prisma_client: PrismaClient,
+        reset_settings: Optional[BudgetResetSettings] = None,
+    ):
         self.proxy_logging_obj: ProxyLogging = proxy_logging_obj
         self.prisma_client: PrismaClient = prisma_client
+        self.reset_settings: BudgetResetSettings = (
+            reset_settings or get_budget_reset_settings()
+        )
 
     async def reset_budget(
         self,
@@ -254,7 +267,7 @@ class ResetBudgetJob:
             if budgets_to_reset is not None and len(budgets_to_reset) > 0:
                 for budget in budgets_to_reset:
                     budget = await ResetBudgetJob._reset_budget_reset_at_date(
-                        budget, now
+                        budget, now, self.reset_settings
                     )
 
                 await self.prisma_client.update_data(
@@ -512,7 +525,9 @@ class ResetBudgetJob:
                 for key in keys_to_reset:
                     try:
                         updated_key = await ResetBudgetJob._reset_budget_for_key(
-                            key=key, current_time=now
+                            key=key,
+                            current_time=now,
+                            reset_settings=self.reset_settings,
                         )
                         if updated_key is not None:
                             updated_keys.append(updated_key)
@@ -595,7 +610,9 @@ class ResetBudgetJob:
                 for user in users_to_reset:
                     try:
                         updated_user = await ResetBudgetJob._reset_budget_for_user(
-                            user=user, current_time=now
+                            user=user,
+                            current_time=now,
+                            reset_settings=self.reset_settings,
                         )
                         if updated_user is not None:
                             updated_users.append(updated_user)
@@ -688,7 +705,9 @@ class ResetBudgetJob:
                 for team in teams_to_reset:
                     try:
                         updated_team = await ResetBudgetJob._reset_budget_for_team(
-                            team=team, current_time=now
+                            team=team,
+                            current_time=now,
+                            reset_settings=self.reset_settings,
                         )
                         if updated_team is not None:
                             updated_teams.append(updated_team)
@@ -770,10 +789,9 @@ class ResetBudgetJob:
         counter_key: str,
         spend_counter_cache: Any,
         now: datetime,
+        reset_settings: BudgetResetSettings = BudgetResetSettings(),
     ) -> bool:
         """Reset a single budget window if expired. Returns True if the window was reset."""
-        from litellm.proxy.common_utils.timezone_utils import get_budget_reset_time
-
         reset_at_str = window.get("reset_at")
         if not reset_at_str:
             return False
@@ -792,8 +810,8 @@ class ResetBudgetJob:
                 verbose_proxy_logger.warning(
                     "Failed to reset Redis counter %s: %s", counter_key, redis_err
                 )
-        window["reset_at"] = get_budget_reset_time(
-            budget_duration=window["budget_duration"]
+        window["reset_at"] = compute_budget_reset_at(
+            budget_duration=window["budget_duration"], settings=reset_settings
         ).isoformat()
         return True
 
@@ -830,7 +848,11 @@ class ResetBudgetJob:
                         f"spend:key:{row['token']}:window:{window['budget_duration']}"
                     )
                     if await ResetBudgetJob._reset_expired_window(
-                        window, counter_key, spend_counter_cache, now
+                        window,
+                        counter_key,
+                        spend_counter_cache,
+                        now,
+                        self.reset_settings,
                     ):
                         changed = True
                 if changed:
@@ -858,7 +880,11 @@ class ResetBudgetJob:
                 for window in windows:
                     counter_key = f"spend:team:{row['team_id']}:window:{window['budget_duration']}"
                     if await ResetBudgetJob._reset_expired_window(
-                        window, counter_key, spend_counter_cache, now
+                        window,
+                        counter_key,
+                        spend_counter_cache,
+                        now,
+                        self.reset_settings,
                     ):
                         changed = True
                 if changed:
@@ -876,6 +902,7 @@ class ResetBudgetJob:
         item: Union[LiteLLM_TeamTable, LiteLLM_UserTable, LiteLLM_VerificationToken],
         current_time: datetime,
         item_type: Literal["key", "team", "user"],
+        reset_settings: BudgetResetSettings = BudgetResetSettings(),
     ):
         """
         In-place, updates spend=0, and sets budget_reset_at to current_time + budget_duration
@@ -890,12 +917,8 @@ class ResetBudgetJob:
         try:
             item.spend = 0.0
             if hasattr(item, "budget_duration") and item.budget_duration is not None:
-                from litellm.proxy.common_utils.timezone_utils import (
-                    get_budget_reset_time,
-                )
-
-                item.budget_reset_at = get_budget_reset_time(
-                    budget_duration=item.budget_duration
+                item.budget_reset_at = compute_budget_reset_at(
+                    budget_duration=item.budget_duration, settings=reset_settings
                 )
             return item
         except Exception as e:
@@ -906,19 +929,29 @@ class ResetBudgetJob:
 
     @staticmethod
     async def _reset_budget_for_team(
-        team: LiteLLM_TeamTable, current_time: datetime
+        team: LiteLLM_TeamTable,
+        current_time: datetime,
+        reset_settings: BudgetResetSettings = BudgetResetSettings(),
     ) -> Optional[LiteLLM_TeamTable]:
         await ResetBudgetJob._reset_budget_common(
-            item=team, current_time=current_time, item_type="team"
+            item=team,
+            current_time=current_time,
+            item_type="team",
+            reset_settings=reset_settings,
         )
         return team
 
     @staticmethod
     async def _reset_budget_for_user(
-        user: LiteLLM_UserTable, current_time: datetime
+        user: LiteLLM_UserTable,
+        current_time: datetime,
+        reset_settings: BudgetResetSettings = BudgetResetSettings(),
     ) -> Optional[LiteLLM_UserTable]:
         await ResetBudgetJob._reset_budget_common(
-            item=user, current_time=current_time, item_type="user"
+            item=user,
+            current_time=current_time,
+            item_type="user",
+            reset_settings=reset_settings,
         )
         return user
 
@@ -937,16 +970,14 @@ class ResetBudgetJob:
 
     @staticmethod
     async def _reset_budget_reset_at_date(
-        budget: LiteLLM_BudgetTableFull, current_time: datetime
+        budget: LiteLLM_BudgetTableFull,
+        current_time: datetime,
+        reset_settings: BudgetResetSettings = BudgetResetSettings(),
     ) -> LiteLLM_BudgetTableFull:
         try:
             if budget.budget_duration is not None:
-                from litellm.proxy.common_utils.timezone_utils import (
-                    get_budget_reset_time,
-                )
-
-                budget.budget_reset_at = get_budget_reset_time(
-                    budget_duration=budget.budget_duration
+                budget.budget_reset_at = compute_budget_reset_at(
+                    budget_duration=budget.budget_duration, settings=reset_settings
                 )
         except Exception as e:
             verbose_proxy_logger.exception(
@@ -957,9 +988,14 @@ class ResetBudgetJob:
 
     @staticmethod
     async def _reset_budget_for_key(
-        key: LiteLLM_VerificationToken, current_time: datetime
+        key: LiteLLM_VerificationToken,
+        current_time: datetime,
+        reset_settings: BudgetResetSettings = BudgetResetSettings(),
     ) -> Optional[LiteLLM_VerificationToken]:
         await ResetBudgetJob._reset_budget_common(
-            item=key, current_time=current_time, item_type="key"
+            item=key,
+            current_time=current_time,
+            item_type="key",
+            reset_settings=reset_settings,
         )
         return key
