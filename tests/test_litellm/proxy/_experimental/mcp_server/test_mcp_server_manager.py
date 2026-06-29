@@ -5004,5 +5004,25 @@ class TestCreateMcpClientV2Graft:
         assert client._get_auth_headers()["Authorization"] == "Bearer hook-jwt"
 
 
+def test_should_strip_caller_authorization_for_token_exchange():
+    """OBO: the inbound bearer is the subject token (exchanged), never forwarded upstream raw."""
+    server = MCPServer(
+        server_id="te-strip",
+        name="te-strip-server",
+        url="https://up.example.com",
+        transport=MCPTransport.http,
+        auth_type=MCPAuth.oauth2_token_exchange,
+        token_exchange_endpoint="https://idp.example.com/token",
+        client_id="cid",
+        client_secret="csec",
+    )
+    assert (
+        _should_strip_caller_authorization(
+            mcp_server=server, raw_headers=None, user_api_key_auth=None
+        )
+        is True
+    )
+
+
 if __name__ == "__main__":
     pytest.main([__file__])
