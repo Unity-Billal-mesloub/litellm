@@ -46,9 +46,7 @@ async def _post_exchange_endpoint(url: str, form: dict[str, str]) -> dict[str, o
     except httpx.HTTPStatusError as status_err:
         status_code = status_err.response.status_code
         if 400 <= status_code < 500:
-            raise SubjectTokenRejected(
-                f"IdP rejected the token exchange (HTTP {status_code})"
-            ) from status_err
+            raise SubjectTokenRejected(f"IdP rejected the token exchange (HTTP {status_code})") from status_err
         verbose_logger.warning("MCP token exchange request failed: %s", status_err)
         return None
     except Exception as exc:  # noqa: BLE001
