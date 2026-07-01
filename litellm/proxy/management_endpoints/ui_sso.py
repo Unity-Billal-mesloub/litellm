@@ -36,7 +36,7 @@ if TYPE_CHECKING:
 
 import jwt
 from fastapi import APIRouter, Depends, Header, HTTPException, Request, status
-from fastapi.responses import RedirectResponse
+from fastapi.responses import RedirectResponse, Response
 
 import litellm
 from litellm._logging import verbose_proxy_logger
@@ -94,6 +94,7 @@ from litellm.proxy.common_utils.html_forms.ui_login import build_ui_login_form
 from litellm.proxy.common_utils.user_api_key_cache import UserApiKeyCache
 from litellm.proxy.management_endpoints.internal_user_endpoints import new_user
 from litellm.proxy.management_endpoints.sso import CustomMicrosoftSSO
+from litellm.proxy.management_endpoints.sso.saml_sso import SAMLAuthHandler
 from litellm.proxy.management_endpoints.sso_helper_utils import (
     check_is_admin_only_access,
     has_admin_ui_access,
@@ -820,6 +821,27 @@ def process_sso_jwt_access_token(
     return None
 
 
+async def _raise_if_sso_exceeds_free_user_limit(premium_user: bool, prisma_client: Optional[PrismaClient]) -> None:
+    """Free tier allows SSO for up to 5 billable users; beyond that requires an Enterprise license."""
+    if premium_user is True:
+        return
+    if prisma_client is None:
+        raise ProxyException(
+            message=CommonProxyErrors.db_not_connected_error.value,
+            type=ProxyErrorTypes.auth_error,
+            param="premium_user",
+            code=status.HTTP_403_FORBIDDEN,
+        )
+    billable_users = await UserRepository(prisma_client).count_billable_users()
+    if billable_users and billable_users > 5:
+        raise ProxyException(
+            message="You must be a LiteLLM Enterprise user to use SSO for more than 5 users. If you have a license please set `LITELLM_LICENSE` in your env. If you want to obtain a license meet with us here: https://enterprise.litellm.ai/demo You are seeing this error message because You configured SSO (one of `MICROSOFT_CLIENT_ID`, `GOOGLE_CLIENT_ID`, `GENERIC_CLIENT_ID`, or SAML) in your env. Please unset it",
+            type=ProxyErrorTypes.auth_error,
+            param="premium_user",
+            code=status.HTTP_403_FORBIDDEN,
+        )
+
+
 @router.get("/sso/key/generate", tags=["experimental"], include_in_schema=False)
 async def google_login(
     request: Request,
@@ -854,25 +876,13 @@ async def google_login(
             return admin_ui_disabled()
 
     ####### Check if user is a Enterprise / Premium User #######
-    if microsoft_client_id is not None or google_client_id is not None or generic_client_id is not None:
-        if premium_user is not True:
-            # Check if under 'free SSO user' limit
-            if prisma_client is not None:
-                billable_users = await UserRepository(prisma_client).count_billable_users()
-                if billable_users and billable_users > 5:
-                    raise ProxyException(
-                        message="You must be a LiteLLM Enterprise user to use SSO for more than 5 users. If you have a license please set `LITELLM_LICENSE` in your env. If you want to obtain a license meet with us here: https://enterprise.litellm.ai/demo You are seeing this error message because You set one of `MICROSOFT_CLIENT_ID`, `GOOGLE_CLIENT_ID`, or `GENERIC_CLIENT_ID` in your env. Please unset this",
-                        type=ProxyErrorTypes.auth_error,
-                        param="premium_user",
-                        code=status.HTTP_403_FORBIDDEN,
-                    )
-            else:
-                raise ProxyException(
-                    message=CommonProxyErrors.db_not_connected_error.value,
-                    type=ProxyErrorTypes.auth_error,
-                    param="premium_user",
-                    code=status.HTTP_403_FORBIDDEN,
-                )
+    if (
+        microsoft_client_id is not None
+        or google_client_id is not None
+        or generic_client_id is not None
+        or SAMLAuthHandler.is_saml_configured()
+    ):
+        await _raise_if_sso_exceeds_free_user_limit(premium_user, prisma_client)
 
     ####### Detect DB + MASTER KEY in .env #######
     missing_env_vars = show_missing_vars_in_env()
@@ -909,6 +919,19 @@ async def google_login(
             raise ValueError(
                 "Enterprise features are not available. Custom UI SSO sign-in requires LiteLLM Enterprise."
             )
+
+    if (
+        microsoft_client_id is None
+        and google_client_id is None
+        and generic_client_id is None
+        and SAMLAuthHandler.is_saml_configured()
+    ):
+        verbose_proxy_logger.info("Redirecting to SAML SSO login")
+        return await SAMLAuthHandler.build_login_redirect(
+            request=request,
+            cache=user_api_key_cache,
+            relay_state=return_to,
+        )
 
     # Check if we should use SSO handler
     if (
@@ -1849,6 +1872,86 @@ async def auth_callback(request: Request, state: Optional[str] = None):
         generic_client_id=generic_client_id,
         ui_access_mode=ui_access_mode,
         access_token_payload=access_token_payload,
+        jwt_handler=jwt_handler,
+        return_to=cp_return_to,
+    )
+
+
+@router.get("/sso/saml/login", tags=["experimental"], include_in_schema=False)
+async def saml_login(request: Request, return_to: Optional[str] = None):
+    """SP-initiated SAML login. Redirects the user to the configured IdP."""
+    from litellm.proxy.proxy_server import user_api_key_cache
+
+    _disable_ui_flag = os.getenv("DISABLE_ADMIN_UI")
+    if _disable_ui_flag is not None and str_to_bool(value=_disable_ui_flag):
+        return admin_ui_disabled()
+
+    return await SAMLAuthHandler.build_login_redirect(request=request, cache=user_api_key_cache, relay_state=return_to)
+
+
+@router.get("/sso/saml/metadata", tags=["experimental"], include_in_schema=False)
+async def saml_metadata(request: Request):
+    """Service Provider metadata XML, for registering this proxy at the IdP."""
+    from litellm.proxy.proxy_server import user_api_key_cache
+
+    metadata = await SAMLAuthHandler.build_sp_metadata(request=request, cache=user_api_key_cache)
+    return Response(content=metadata, media_type="application/xml")
+
+
+@router.post("/sso/saml/callback", tags=["experimental"], include_in_schema=False)
+async def saml_callback(request: Request):
+    """Assertion Consumer Service. Validates the IdP assertion and issues a UI session."""
+    from litellm.proxy.proxy_server import (
+        general_settings,
+        jwt_handler,
+        master_key,
+        premium_user,
+        prisma_client,
+        user_api_key_cache,
+    )
+
+    _disable_ui_flag = os.getenv("DISABLE_ADMIN_UI")
+    if _disable_ui_flag is not None and str_to_bool(value=_disable_ui_flag):
+        return admin_ui_disabled()
+
+    if prisma_client is None:
+        raise HTTPException(status_code=500, detail=CommonProxyErrors.db_not_connected_error.value)
+    if master_key is None:
+        raise ProxyException(
+            message="Master Key not set for Proxy. Set `LITELLM_MASTER_KEY` in .env or general_settings:master_key in config.yaml.",
+            type=ProxyErrorTypes.auth_error,
+            param="master_key",
+            code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+        )
+
+    form = await request.form()
+    saml_response = form.get("SAMLResponse")
+    relay_state = form.get("RelayState")
+    if not isinstance(saml_response, str):
+        raise HTTPException(status_code=400, detail="Missing SAMLResponse in callback request.")
+
+    post_data = {"SAMLResponse": saml_response}
+    if isinstance(relay_state, str):
+        post_data["RelayState"] = relay_state
+
+    result = await SAMLAuthHandler.handle_acs(request=request, cache=user_api_key_cache, post_data=post_data)
+
+    await _raise_if_sso_exceeds_free_user_limit(premium_user, prisma_client)
+
+    ui_access_mode = general_settings.get("ui_access_mode", None)
+    cp_return_to: Optional[str] = (
+        relay_state
+        if isinstance(relay_state, str) and SSOAuthenticationHandler._validate_return_to(relay_state)
+        else None
+    )
+
+    return await SSOAuthenticationHandler.get_redirect_response_from_openid(
+        result=result,
+        request=request,
+        received_response=None,
+        generic_client_id=None,
+        ui_access_mode=ui_access_mode,
+        access_token_payload=None,
         jwt_handler=jwt_handler,
         return_to=cp_return_to,
     )

@@ -766,6 +766,10 @@ async def get_sso_settings():
         generic_authorization_endpoint=decrypted_sso_settings_dict.get("generic_authorization_endpoint", None),
         generic_token_endpoint=decrypted_sso_settings_dict.get("generic_token_endpoint", None),
         generic_userinfo_endpoint=decrypted_sso_settings_dict.get("generic_userinfo_endpoint", None),
+        saml_idp_metadata_url=decrypted_sso_settings_dict.get("saml_idp_metadata_url", None),
+        saml_idp_metadata_xml=decrypted_sso_settings_dict.get("saml_idp_metadata_xml", None),
+        saml_sp_entity_id=decrypted_sso_settings_dict.get("saml_sp_entity_id", None),
+        saml_allow_unsolicited=decrypted_sso_settings_dict.get("saml_allow_unsolicited", None),
         proxy_base_url=decrypted_sso_settings_dict.get("proxy_base_url", None),
         user_email=decrypted_sso_settings_dict.get("user_email"),
         ui_access_mode=decrypted_sso_settings_dict.get("ui_access_mode"),
@@ -847,6 +851,10 @@ async def update_sso_settings(
         "generic_authorization_endpoint": "GENERIC_AUTHORIZATION_ENDPOINT",
         "generic_token_endpoint": "GENERIC_TOKEN_ENDPOINT",
         "generic_userinfo_endpoint": "GENERIC_USERINFO_ENDPOINT",
+        "saml_idp_metadata_url": "SAML_IDP_METADATA_URL",
+        "saml_idp_metadata_xml": "SAML_IDP_METADATA_XML",
+        "saml_sp_entity_id": "SAML_SP_ENTITY_ID",
+        "saml_allow_unsolicited": "SAML_ALLOW_UNSOLICITED",
         "proxy_base_url": "PROXY_BASE_URL",
     }
 

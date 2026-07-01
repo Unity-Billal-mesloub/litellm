@@ -23,6 +23,7 @@ const ssoProviderLogoMap: Record<string, string> = {
   microsoft: "https://upload.wikimedia.org/wikipedia/commons/a/a8/Microsoft_Azure_Logo.svg",
   okta: "https://www.okta.com/sites/default/files/Okta_Logo_BrightBlue_Medium.png",
   generic: "",
+  saml: "",
 };
 
 // Define the SSO provider configuration type
@@ -32,6 +33,8 @@ interface SSOProviderConfig {
     label: string;
     name: string;
     placeholder?: string;
+    required?: boolean;
+    type?: "password" | "textarea" | "checkbox";
   }>;
 }
 
@@ -99,6 +102,53 @@ const ssoProviderConfigs: Record<string, SSOProviderConfig> = {
       { label: "Userinfo Endpoint", name: "generic_userinfo_endpoint" },
     ],
   },
+  saml: {
+    envVarMap: {
+      saml_idp_metadata_url: "SAML_IDP_METADATA_URL",
+      saml_idp_metadata_xml: "SAML_IDP_METADATA_XML",
+      saml_sp_entity_id: "SAML_SP_ENTITY_ID",
+      saml_allow_unsolicited: "SAML_ALLOW_UNSOLICITED",
+    },
+    fields: [
+      {
+        label: "IdP Metadata URL",
+        name: "saml_idp_metadata_url",
+        required: false,
+        placeholder: "https://idp.example.com/metadata (use this or the metadata XML below)",
+      },
+      {
+        label: "IdP Metadata XML",
+        name: "saml_idp_metadata_xml",
+        required: false,
+        type: "textarea",
+        placeholder: "Paste the IdP metadata XML here if you do not have a metadata URL",
+      },
+      {
+        label: "SP Entity ID",
+        name: "saml_sp_entity_id",
+        required: false,
+        placeholder: "Defaults to <proxy base url>/sso/saml/metadata",
+      },
+      {
+        label: "Allow IdP-initiated (unsolicited) responses",
+        name: "saml_allow_unsolicited",
+        required: false,
+        type: "checkbox",
+      },
+    ],
+  },
+};
+
+const detectSSOProvider = (values: Record<string, unknown>): string | null => {
+  if (values.google_client_id) return "google";
+  if (values.microsoft_client_id) return "microsoft";
+  if (values.generic_client_id) {
+    const authEndpoint =
+      typeof values.generic_authorization_endpoint === "string" ? values.generic_authorization_endpoint : "";
+    return authEndpoint.includes("okta") || authEndpoint.includes("auth0") ? "okta" : "generic";
+  }
+  if (values.saml_idp_metadata_url || values.saml_idp_metadata_xml) return "saml";
+  return null;
 };
 
 const SSOModals: React.FC<SSOModalsProps> = ({
@@ -127,22 +177,7 @@ const SSOModals: React.FC<SSOModalsProps> = ({
             console.log("user_email from API:", ssoData.values.user_email); // Debug log
 
             // Determine which SSO provider is configured
-            let selectedProvider = null;
-            if (ssoData.values.google_client_id) {
-              selectedProvider = "google";
-            } else if (ssoData.values.microsoft_client_id) {
-              selectedProvider = "microsoft";
-            } else if (ssoData.values.generic_client_id) {
-              // Check if it looks like Okta based on endpoints
-              if (
-                ssoData.values.generic_authorization_endpoint?.includes("okta") ||
-                ssoData.values.generic_authorization_endpoint?.includes("auth0")
-              ) {
-                selectedProvider = "okta";
-              } else {
-                selectedProvider = "generic";
-              }
-            }
+            const selectedProvider = detectSSOProvider(ssoData.values);
 
             // Extract role mappings if they exist
             let roleMappingFields = {};
@@ -173,6 +208,7 @@ const SSOModals: React.FC<SSOModalsProps> = ({
               user_email: ssoData.values.user_email,
               ...ssoData.values,
               ...roleMappingFields,
+              saml_allow_unsolicited: ssoData.values.saml_allow_unsolicited === "true",
             };
 
             console.log("Setting form values:", formValues); // Debug log
@@ -215,6 +251,10 @@ const SSOModals: React.FC<SSOModalsProps> = ({
       const payload: any = {
         ...rest,
       };
+
+      if (typeof payload.saml_allow_unsolicited === "boolean") {
+        payload.saml_allow_unsolicited = payload.saml_allow_unsolicited ? "true" : "false";
+      }
 
       // Add role mappings if use_role_mappings is checked
       if (use_role_mappings) {
@@ -278,6 +318,10 @@ const SSOModals: React.FC<SSOModalsProps> = ({
         generic_authorization_endpoint: null,
         generic_token_endpoint: null,
         generic_userinfo_endpoint: null,
+        saml_idp_metadata_url: null,
+        saml_idp_metadata_xml: null,
+        saml_sp_entity_id: null,
+        saml_allow_unsolicited: null,
         proxy_base_url: null,
         user_email: null,
         sso_provider: null,
@@ -307,16 +351,31 @@ const SSOModals: React.FC<SSOModalsProps> = ({
     const config = ssoProviderConfigs[provider];
     if (!config) return null;
 
-    return config.fields.map((field) => (
-      <Form.Item
-        key={field.name}
-        label={field.label}
-        name={field.name}
-        rules={[{ required: true, message: `Please enter the ${field.label.toLowerCase()}` }]}
-      >
-        {field.name.includes("client") ? <Input.Password /> : <TextInput placeholder={field.placeholder} />}
-      </Form.Item>
-    ));
+    return config.fields.map((field) => {
+      const isRequired = field.required !== false;
+      const rules = isRequired ? [{ required: true, message: `Please enter the ${field.label.toLowerCase()}` }] : [];
+      let control: React.ReactNode;
+      if (field.type === "checkbox") {
+        control = <Checkbox />;
+      } else if (field.type === "textarea") {
+        control = <Input.TextArea rows={4} placeholder={field.placeholder} />;
+      } else if (field.type === "password" || field.name.includes("client")) {
+        control = <Input.Password />;
+      } else {
+        control = <TextInput placeholder={field.placeholder} />;
+      }
+      return (
+        <Form.Item
+          key={field.name}
+          label={field.label}
+          name={field.name}
+          rules={rules}
+          valuePropName={field.type === "checkbox" ? "checked" : undefined}
+        >
+          {control}
+        </Form.Item>
+      );
+    });
   };
 
   return (
@@ -356,7 +415,9 @@ const SSOModals: React.FC<SSOModalsProps> = ({
                       <span>
                         {value.toLowerCase() === "okta"
                           ? "Okta / Auth0"
-                          : value.charAt(0).toUpperCase() + value.slice(1)}{" "}
+                          : value.toLowerCase() === "saml"
+                            ? "SAML"
+                            : value.charAt(0).toUpperCase() + value.slice(1)}{" "}
                         SSO
                       </span>
                     </div>
