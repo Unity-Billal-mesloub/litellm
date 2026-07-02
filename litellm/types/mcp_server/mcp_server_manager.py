@@ -1,7 +1,7 @@
 from datetime import datetime
 from typing import Any, Dict, List, Literal, Optional
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, model_validator
 
 from litellm.types.mcp import (
     MCPAuth,
@@ -146,6 +146,30 @@ class MCPServer(BaseModel):
         return self.auth_type == MCPAuth.oauth2 and not self.has_client_credentials
 
     @property
+    def is_true_passthrough(self) -> bool:
+        """True for the transparent-proxy mode: LiteLLM performs no admission auth and forwards the
+        client's ``Authorization`` to the upstream unchanged."""
+        return self.auth_type == MCPAuth.true_passthrough
+
+    @property
+    def is_oauth_delegate(self) -> bool:
+        """True for the delegated-upstream-OAuth mode: LiteLLM still admits the caller (API key / SSO /
+        JWT) but forwards the caller's separate upstream ``Authorization`` unchanged, minting nothing."""
+        return self.auth_type == MCPAuth.oauth_delegate
+
+    @model_validator(mode="after")
+    def _reject_client_credentials_for_forwarded_modes(self) -> "MCPServer":
+        """The caller-forwarded modes forward the caller's own upstream token, so combining them with the
+        gateway service-account flow (``oauth2_flow=client_credentials``) is contradictory and would let an
+        admission-skipped caller reach the upstream as LiteLLM's service account. Reject it at construction."""
+        if (self.is_true_passthrough or self.is_oauth_delegate) and self.has_client_credentials:
+            raise ValueError(
+                "auth_type 'true_passthrough' / 'oauth_delegate' forward the caller's upstream credential and "
+                "cannot be combined with oauth2_flow='client_credentials' (a gateway service-account flow)"
+            )
+        return self
+
+    @property
     def requires_per_user_auth(self) -> bool:
         """
         True if this server requires per-user/per-request authentication.
@@ -158,6 +182,9 @@ class MCPServer(BaseModel):
         """
         # OAuth2 without client credentials
         if self.needs_user_oauth_token:
+            return True
+
+        if self.is_true_passthrough or self.is_oauth_delegate:
             return True
 
         # PAT passthrough: auth_type is none but extra_headers includes auth headers
