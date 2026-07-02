@@ -132,6 +132,13 @@ class MCPCredentials(TypedDict, total=False):
     Default: urn:ietf:params:oauth:token-type:access_token
     """
 
+    token_exchange_profile: Optional[str]
+    """
+    Token exchange wire dialect: "rfc8693" (default, the standard token-exchange grant) or
+    "entra_obo" (Microsoft Entra On-Behalf-Of, the RFC 7523 jwt-bearer grant + requested_token_use
+    extension). Not a secret; stored unencrypted.
+    """
+
 
 class MCPServerCostInfo(TypedDict, total=False):
     default_cost_per_query: Optional[float]
