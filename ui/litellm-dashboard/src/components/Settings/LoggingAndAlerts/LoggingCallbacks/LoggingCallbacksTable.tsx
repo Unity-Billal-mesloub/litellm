@@ -27,17 +27,33 @@ const isDestination = (record: AlertingObject): boolean => record.credentialName
 
 const SCOPE_BADGES_LIMIT = 4;
 
-// Renders the union of identities that route to this destination, with each team/org
-// labeled by its alias. Global supersedes everything. Pulls from record.resolvedScope
-// (computed at the page level from BOTH directions: destination-side access AND
-// identity-side metadata.logging_exporters).
+// Renders the access/visibility scope of a destination.
+//
+// The Scope column answers "who can see and assign this destination?" —
+// separate from the Mode column which answers "when does it actually export?".
+//
+// Rendering rules:
+//   auto_enable=true, no other grants → "All requests" (fires without assignment;
+//     displayed in orange so admins can distinguish it from ungranted destinations)
+//   access.global=true → "Global access" (everyone can assign it, but still
+//     needs explicit logging_exporters assignment to export)
+//   access.teams/orgs → per-team/org badges (existing behaviour)
+//   nothing → "No grants" (truly invisible to non-admins; never exports)
 const ScopeCell: React.FC<{ record: AlertingObject }> = ({ record }) => {
   const scope = record.resolvedScope;
+  const autoEnable = record.autoEnable === true;
+
+  // auto_enable: fires on every request regardless of assignment. Show a
+  // distinct orange badge so admins cannot mistake it for an ungranted dest.
+  if (autoEnable && (!scope || (!scope.global && scope.teams.length === 0 && scope.orgs.length === 0))) {
+    return <Tag color="orange">All requests</Tag>;
+  }
+
   if (!scope || (!scope.global && scope.teams.length === 0 && scope.orgs.length === 0)) {
-    return <span className="text-gray-400">—</span>;
+    return <span className="text-gray-400">No grants</span>;
   }
   if (scope.global) {
-    return <Tag color="blue">Global</Tag>;
+    return <Tag color="blue">Global access</Tag>;
   }
   const items = [
     ...scope.teams.map((label) => ({ kind: "team" as const, label })),
@@ -97,9 +113,16 @@ export const LoggingCallbacksTable: React.FC<LoggingCallbacksProps> = ({
       title: <span className="font-medium text-gray-700">Mode</span>,
       key: "mode",
       render: (_: unknown, record: CallbackRow) => {
-        // Destination rows fan out on every span, so the success/failure split
-        // does not apply -- only config callbacks carry a mode.
-        if (isDestination(record)) return <span className="text-gray-400">—</span>;
+        // Destination rows show their enablement behaviour: auto_enable=true
+        // means the destination exports on every request without assignment;
+        // false means it only exports when explicitly named in logging_exporters.
+        if (isDestination(record)) {
+          return record.autoEnable === true ? (
+            <Tag color="orange">Auto-enabled</Tag>
+          ) : (
+            <span className="text-gray-400 text-xs">Manual assignment</span>
+          );
+        }
         // Backend sends `type` (success | failure); legacy in-memory rows
         // from add-callback flow set `mode`. Read both so newly-added rows
         // and server-fetched rows both render correctly.
