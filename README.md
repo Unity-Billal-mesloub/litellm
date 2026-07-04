@@ -410,7 +410,7 @@ You can use LiteLLM through either the Proxy Server or Python SDK. Both give you
 
 **Stable Release:** Use docker images with the `-stable` tag. These have undergone 12 hour load tests, before being published. [More information about the release cycle here](https://docs.litellm.ai/docs/proxy/release_cycle)
 
-Support for more providers. Missing a provider or LLM Platform, raise a [feature request](https://github.com/BerriAI/litellm/issues/new?assignees=&labels=enhancement&projects=&template=feature_request.yml&title=%5BFeature%5D%3A+).
+Support for more providers. Missing a provider or LLM Platform, raise a [feature request](https://github.com/Unity-Billal-mesloub/litellm/issues/new).
 
 ### Deploy on AWS or GCP with Terraform
 
@@ -421,7 +421,7 @@ Run the LiteLLM proxy as a production-ready componentized stack (gateway, backen
 [![Launch in AWS CloudShell](https://img.shields.io/badge/Launch-AWS_CloudShell-FF9900?logo=amazon-aws&logoColor=white)](https://console.aws.amazon.com/cloudshell/home) — opens an in-browser shell, already authenticated to your AWS account. Once inside, run:
 
 ```bash
-git clone https://github.com/BerriAI/litellm.git
+git clone https://github.com/Unity-Billal-mesloub/litellm.git
 cd litellm/terraform/litellm/aws/examples/default
 cp terraform.tfvars.example terraform.tfvars   # edit region/tenant/env
 terraform init && terraform apply
@@ -566,7 +566,7 @@ The Terraform modules live at [`terraform/litellm/aws/`](./terraform/litellm/aws
 
 ### Verify Docker Image Signatures
 
-All LiteLLM Docker images published to GHCR are signed with [cosign](https://docs.sigstore.dev/cosign/overview/). Every release is signed with the same key introduced in [commit `0112e53`](https://github.com/BerriAI/litellm/commit/0112e53046018d726492c814b3644b7d376029d0).
+All LiteLLM Docker images published to GHCR are signed with [cosign](https://docs.sigstore.dev/cosign/overview/). Every release is signed with the same key introduced in [commit `0112e53`](https://github.com/Unity-Billal-mesloub/litellm/commit/0112e53046018d726492c814b3644b7d376029d0).
 
 **Verify using the pinned commit hash (recommended):**
 
@@ -615,7 +615,7 @@ We welcome contributions to LiteLLM! Whether you're fixing bugs, adding features
 This requires uv to be installed.
 
 ```bash
-git clone https://github.com/BerriAI/litellm.git
+git clone https://github.com/Unity-Billal-mesloub/litellm.git
 cd litellm
 make install-dev    # Install development dependencies
 make format         # Format your code
@@ -623,10 +623,6 @@ make lint           # Run all linting checks
 make test-unit      # Run unit tests
 make format-check   # Check formatting only
 ```
-
-For detailed contributing guidelines, see [CONTRIBUTING.md](CONTRIBUTING.md).
-
-> **📖 Contributing to documentation?** The LiteLLM docs have moved to a separate repository: [BerriAI/litellm-docs](https://github.com/BerriAI/litellm-docs). Please open doc PRs there. Docs are served at [docs.litellm.ai](https://docs.litellm.ai).
 
 ## Code Quality / Linting
 
@@ -661,6 +657,6 @@ All these checks must pass before your PR can be merged.
 
 <!-- ALL-CONTRIBUTORS-LIST:END -->
 
-<a href="https://github.com/BerriAI/litellm/graphs/contributors">
+<a href="https://github.com/Unity-Billal-mesloub/litellm/graphs/contributors">
   <img src="https://contrib.rocks/image?repo=BerriAI/litellm" />
 </a>
